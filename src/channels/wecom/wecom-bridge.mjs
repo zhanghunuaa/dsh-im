@@ -20,6 +20,12 @@ import {
   batchInputGroupUnsupportedMessage,
   isBatchInputCommand,
 } from '../shared/batch-input.mjs';
+import {
+  ContinuousInputManager,
+  continuousInputBusyMessage,
+  continuousInputNewSessionFailedMessage,
+  readyGoMarker,
+} from '../shared/continuous-input.mjs';
 import { runCompactCommand } from '../shared/compact-command.mjs';
 import { isSharedLocalCommand } from '../shared/command-permission.mjs';
 import { isClearCommand, runClearCommand } from '../shared/clear-command.mjs';
@@ -108,8 +114,12 @@ function helpText() {
     t('/stop  停止当前任务'),
     t('/steer 补充指令  纠偏当前任务'),
     t('/batch  开始批量输入（仅私聊，最多 10 条文字）'),
-    t('/send  提交当前批次'),
-    t('/cancel  取消当前批次'),
+    t('/send  提交当前 /batch 批次'),
+    t('/cancel  取消当前 /batch 批次'),
+    t('ready  开始连续消息收集并自动开启新会话（仅私聊，文字/图片/文件均可，发送 go 后统一处理）'),
+    t('go  提交已收集的连续消息并开始处理'),
+    t('cancel  取消连续消息收集（不带斜杠，与 /batch 的 /cancel 相互独立）'),
+    t('合并转发的聊天记录：企微接口不提供记录内容，请用 ready 逐条发送或导出为文件'),
     t('/status  检查连接状态'),
     t('/version  查看插件版本'),
     t('/help  显示本帮助'),
@@ -118,6 +128,50 @@ function helpText() {
 const MAX_REPLY_BYTES = 18_000;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_PREFETCHED_IMAGES = 4;
+
+// A forwarded chat record (合并转发) reaches an Enterprise WeChat AI bot as a
+// type-only callback frame: msgtype is "merged_msg" (older payloads say
+// "unsupported"), and the body carries no items, no download url and no
+// media_id. Confirmed by the WeCom developer community thread
+// "智能机器人收到的合并转发消息（merged_msg）无法通过回调获取？" (2026-07).
+// The bridge therefore answers with actionable guidance instead of silently
+// replying "unsupported", and still flattens items if a future payload version
+// starts shipping them.
+const MERGED_FORWARD_MESSAGE_TYPES = new Set(['merged_msg', 'merged_forward', 'chat_record']);
+
+function isMergedForwardType(body) {
+  return MERGED_FORWARD_MESSAGE_TYPES.has(body?.msgtype);
+}
+
+function mergedForwardContainer(body) {
+  for (const key of ['merged_msg', 'merged_forward', 'chat_record']) {
+    const value = body?.[key];
+    if (value && typeof value === 'object') return value;
+  }
+  return null;
+}
+
+function mergedForwardItems(body) {
+  const container = mergedForwardContainer(body);
+  if (!container) return null;
+  for (const key of ['items', 'msg_item', 'item', 'records', 'chat_record_items']) {
+    if (Array.isArray(container[key])) return container[key];
+  }
+  return null;
+}
+
+function mergedForwardUnsupportedMessage() {
+  return [
+    t('收到一条「合并转发的聊天记录」，但企业微信智能机器人接口只下发消息类型（merged_msg），不提供记录内的文字、图片或文件，因此无法直接读取。'),
+    '',
+    t('请改用以下任一方式：'),
+    t('1. 先发送 ready，再把聊天记录中的内容逐条粘贴或转发，最后发送 go（会合并成一次处理）；'),
+    t('2. 直接复制关键内容成一条文字发送；'),
+    t('3. 将聊天记录导出为文件后发送（支持 docx、pdf、txt 等）。'),
+    '',
+    t('说明：企业微信「会话内容存档」接口可以拿到合并记录明细，但需要管理员开通并接入存档 SDK，当前机器人未启用。'),
+  ].join('\n');
+}
 
 function nonEmptyString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
@@ -144,6 +198,31 @@ function messageContentText(body) {
       .map((item) => item.text.content)
       .join('\n')
       .trim();
+  } else if (isMergedForwardType(body)) {
+    const container = mergedForwardContainer(body);
+    const title = nonEmptyString(container?.title ?? container?.name);
+    const items = mergedForwardItems(body);
+    const lines = [];
+    if (title) lines.push(t('[合并转发的聊天记录] {title}', { title }));
+    if (items) {
+      for (const [index, item] of items.entries()) {
+        const label = t('[记录 {index}]', { index: index + 1 });
+        const itemText = messageContentText(item);
+        if (itemText) {
+          lines.push(`${label} ${itemText}`);
+        } else if (item?.msgtype === 'image') {
+          lines.push(`${label} ${t('[图片]')}`);
+        } else if (item?.msgtype === 'file') {
+          const name = nonEmptyString(
+            item.file?.filename ?? item.file?.file_name ?? item.file?.name,
+          );
+          lines.push(`${label} ${name ? t('[文件] {name}', { name }) : t('[文件]')}`);
+        } else if (item?.msgtype === 'video') {
+          lines.push(`${label} ${t('[视频]')}`);
+        }
+      }
+    }
+    text = lines.join('\n').trim();
   }
   return text;
 }
@@ -160,16 +239,25 @@ function messageText(frame) {
 
 function imageContents(body) {
   if (body?.msgtype === 'image') return [body.image];
-  if (body?.msgtype !== 'mixed' || !Array.isArray(body.mixed?.msg_item)) return [];
-  return body.mixed.msg_item
-    .filter((item) => item?.msgtype === 'image')
-    .map((item) => item.image);
+  if (body?.msgtype === 'mixed' && Array.isArray(body.mixed?.msg_item)) {
+    return body.mixed.msg_item
+      .filter((item) => item?.msgtype === 'image')
+      .map((item) => item.image);
+  }
+  const items = mergedForwardItems(body);
+  return items
+    ? items.filter((item) => item?.msgtype === 'image' && item.image).map((item) => item.image)
+    : [];
 }
 
 function fileContents(frame) {
   const body = bodyOf(frame);
-  return body.msgtype === 'file' && body.file && typeof body.file === 'object'
-    ? [body.file]
+  if (body.msgtype === 'file' && body.file && typeof body.file === 'object') {
+    return [body.file];
+  }
+  const items = mergedForwardItems(body);
+  return items
+    ? items.filter((item) => item?.msgtype === 'file' && item.file).map((item) => item.file)
     : [];
 }
 
@@ -321,6 +409,83 @@ function prefetchInboundImages(message, signal, limitsPromise) {
         },
       };
     }),
+  };
+}
+
+const CONTINUOUS_MEDIA_RETRY_ATTEMPTS = 3;
+const CONTINUOUS_MEDIA_RETRY_DELAY_MS = 350;
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function mediaErrorText(error) {
+  const text = typeof error?.message === 'string' ? error.message : String(error ?? '');
+  return text.replace(/\s+/g, ' ').trim().slice(0, 160);
+}
+
+/**
+ * Wrap one inbound media source for the ready/go collector.
+ *
+ * The first download starts immediately because Enterprise WeChat media URLs
+ * expire after five minutes, but a failure must not be cached forever: sending
+ * "go" again has to be able to retry while the URL is still alive. Each load
+ * therefore retries a few times, and a later load starts a fresh attempt.
+ */
+function retryingMediaSource(source, { kind, signal, limitsPromise = null }) {
+  let cached = null;
+  let pending = null;
+  let lastError = null;
+  const attempt = (remaining, loadSignal, maxBytes) => source.load({
+    signal: loadSignal ?? signal,
+    ...(Number.isFinite(maxBytes) ? { maxBytes } : {}),
+  }).catch(async (error) => {
+    lastError = error;
+    // Image admission errors (too many / too large) are final; a retry cannot
+    // change the limits and would only delay the notice.
+    if (error?.name === 'ImagePromptError' || remaining <= 1) throw error;
+    await delay(CONTINUOUS_MEDIA_RETRY_DELAY_MS);
+    return attempt(remaining - 1, loadSignal, maxBytes);
+  });
+  const wrapper = {
+    ...source,
+    mediaKind: kind,
+    get lastError() {
+      return lastError;
+    },
+    load({ signal: loadSignal, maxBytes } = {}) {
+      if (cached) return Promise.resolve(cached);
+      if (pending) return pending;
+      pending = attempt(CONTINUOUS_MEDIA_RETRY_ATTEMPTS, loadSignal, maxBytes)
+        .then((value) => {
+          cached = value;
+          return value;
+        })
+        .finally(() => {
+          pending = null;
+        });
+      return pending;
+    },
+  };
+  // Start the first download now: the URL is short-lived.
+  const started = limitsPromise
+    ? Promise.resolve(limitsPromise).then((limits) => wrapper.load({
+        maxBytes: limits?.maxDownloadBytes,
+      }))
+    : wrapper.load({});
+  started.catch(() => undefined);
+  return wrapper;
+}
+
+function prefetchContinuousMedia(message, signal, limitsPromise) {
+  return {
+    ...message,
+    images: (message.images ?? []).map((source) => retryingMediaSource(source, {
+      kind: 'image', signal, limitsPromise,
+    })),
+    files: (message.files ?? []).map((source) => retryingMediaSource(source, {
+      kind: 'file', signal,
+    })),
   };
 }
 
@@ -599,6 +764,7 @@ export class WecomHarnessBridge {
   #commandTasks = new Set();
   #approvals;
   #batchInputs = new BatchInputManager();
+  #continuousInputs = new ContinuousInputManager();
   #prefetchedImageCount = 0;
   #menus = new Map();
   #eventIds = new Set();
@@ -939,8 +1105,29 @@ export class WecomHarnessBridge {
     if (body.chattype === 'single') {
       rememberConnectionTestTarget(this.#state, { chatId });
     }
+    // WeCom's AI-bot callback cannot deliver the inside of a forwarded chat
+    // record (see MERGED_FORWARD_MESSAGE_TYPES). Answer with the workaround
+    // instead of the generic "unsupported message" line -- and do it before the
+    // /batch and ready/go collectors so a merged record never lands in one of
+    // them as an empty entry.
+    if (isMergedForwardType(body)
+      && !nonEmptyString(commandMessage.content)
+      && !hasInboundImages(commandMessage)
+      && !hasInboundFiles(commandMessage)) {
+      return this.#finishBatchResult(
+        frame,
+        messageId,
+        chatId,
+        { message: mergedForwardUnsupportedMessage() },
+      );
+    }
     const batchCommand = isBatchInputCommand(commandText);
     const batchStatus = this.#batchInputs.status(key);
+    // /batch, /send and /cancel belong to the /batch manager by name, but the
+    // ready/go collector owns them while it is active. Read the collector state
+    // before the /batch block so /batch can never steal /cancel or /send from a
+    // ready/go batch that is still collecting or submitting.
+    const continuousStatus = this.#continuousInputs.status(key);
     if (batchCommand && body.chattype === 'group') {
       return this.#finishBatchResult(
         frame,
@@ -950,6 +1137,7 @@ export class WecomHarnessBridge {
       );
     }
     if (body.chattype === 'single'
+      && continuousStatus.phase === 'idle'
       && (batchCommand || batchStatus.phase === 'collecting')) {
       const exactBatchStart = /^\/batch$/iu.test(commandText);
       const result = exactBatchStart
@@ -974,6 +1162,85 @@ export class WecomHarnessBridge {
           }, messageId, key, { batchSubmission: result });
         }
         return this.#finishBatchResult(frame, messageId, chatId, result);
+      }
+    }
+    // Continuous input ("ready" ... "go") is the command-free sibling of
+    // /batch. It is a direct-chat protocol only: in a group the bare words
+    // "ready"/"go" stay ordinary messages so the collector cannot hijack a
+    // shared conversation. Everything is collected per message -- text,
+    // images, files and the text of a quoted message -- and exactly one turn
+    // is started when "go" arrives.
+    if (body.chattype === 'single') {
+      const marker = readyGoMarker(commandText);
+      const startRequest = marker === 'ready' && continuousStatus.phase === 'idle';
+      if (continuousStatus.phase !== 'idle' || startRequest) {
+        if (startRequest
+          && (this.#queues.has(key) || pending || this.#approvals.hasPending(key)
+            || batchStatus.phase !== 'idle')) {
+          return this.#finishBatchResult(
+            frame,
+            messageId,
+            chatId,
+            { message: continuousInputBusyMessage() },
+          );
+        }
+        // The bare word "cancel" must always be able to leave the mode. While a
+        // submission is genuinely running the collector answers "处理中" and
+        // /stop ends it; once no queue entry is left for this chat the
+        // submission already died without settling its token, so drop the stale
+        // batch instead of looping on a state that can never finish.
+        if (continuousStatus.phase === 'submitting'
+          && marker === 'cancel'
+          && !this.#queues.has(key)
+          && !pending) {
+          const forced = this.#continuousInputs.forceCancel(key);
+          return this.#finishBatchResult(frame, messageId, chatId, {
+            message: t('上一批连续消息的提交已经结束，已退出连续消息收集（丢弃 {count} 条）。', {
+              count: forced.count,
+            }),
+          });
+        }
+        const quoted = commandMessage.replyTo;
+        const quotedText = nonEmptyString(quoted?.content);
+        const quotedAttachmentCount = Array.isArray(quoted?.attachments)
+          ? quoted.attachments.length
+          : 0;
+        const itemText = [
+          ...(nonEmptyString(commandMessage.content) ? [commandMessage.content] : []),
+          ...(quotedText ? [t('[引用的消息]\n{content}', { content: quotedText })] : []),
+          ...(quotedAttachmentCount > 0
+            ? [t('[引用消息含 {count} 个附件]', { count: quotedAttachmentCount })]
+            : []),
+        ].join('\n\n');
+        const imageCount = commandMessage.images?.length ?? 0;
+        const fileCount = commandMessage.files?.length ?? 0;
+        const result = this.#continuousInputs.handle(key, {
+          text: itemText,
+          marker,
+          plainText: isNativeWecomText(frame) && !hasReplyReference(commandMessage),
+          imageCount,
+          fileCount,
+          hasContent: Boolean(nonEmptyString(commandMessage.content))
+            || imageCount > 0
+            || fileCount > 0
+            || Boolean(quotedText),
+          buildContent: () => prefetchContinuousMedia(
+            commandMessage,
+            this.#signal,
+            this.#harness.getImageInputLimits?.() ?? imageInputLimits(),
+          ),
+        });
+        if (result.handled) {
+          if (result.kind === 'submit') {
+            return this.#submitContinuousBatch({
+              frame, body, messageId, chatId, key, result,
+            });
+          }
+          if (startRequest && result.kind === 'started') {
+            return this.#startContinuousBatchWithNewSession(frame, messageId, chatId, key, result);
+          }
+          return this.#finishBatchResult(frame, messageId, chatId, result);
+        }
       }
     }
     const menuCommand = !hasInboundImages(commandMessage) && !hasInboundFiles(commandMessage)
@@ -1097,49 +1364,175 @@ export class WecomHarnessBridge {
     });
   }
 
+  /**
+   * Starting a batch also starts a fresh DSH Session: the first "ready" runs
+   * the /new command, so a batch never continues the context of the previous
+   * one. "/new" in this bridge is exactly a cleared Session binding, so this is
+   * the same operation the /new command performs; the acknowledgement tells the
+   * user whether the reset worked.
+   */
+  async #startContinuousBatchWithNewSession(frame, messageId, chatId, key, result) {
+    let message = result.message;
+    try {
+      await this.#state.clearSession(key);
+    } catch (error) {
+      this.#logger.warn?.(
+        '[dsh-im:wecom] unable to start a new Session for the ready/go batch:',
+        error?.message ?? error,
+      );
+      message = continuousInputNewSessionFailedMessage();
+    }
+    return this.#finishBatchResult(frame, messageId, chatId, { ...result, message });
+  }
+
+  /**
+   * Submit one ready/go batch after validating its collected media.
+   *
+   * WeCom media URLs expire quickly and downloads can fail transiently. Materializing
+   * the attachments here means a failed download no longer kills the whole batch with
+   * "文件下载失败": whatever succeeded is submitted with an explicit note, and if
+   * nothing at all is left the batch stays open for a retry.
+   */
+  async #submitContinuousBatch({ frame, body, messageId, chatId, key, result }) {
+    const { preparedMessage, ...submission } = result;
+    const preflight = await this.#prepareContinuousSubmission(result);
+    if (!preflight.ok) {
+      const failed = this.#continuousInputs.fail(key, submission.token);
+      const message = [preflight.notice, failed.message].filter(Boolean).join('\n\n');
+      return this.#finishBatchResult(frame, messageId, chatId, { message });
+    }
+    if (preflight.notice) {
+      await this.#sendImmediate(frame, chatId, preflight.notice).catch(() => undefined);
+    }
+    // "ready" already cleared the binding; repeat it here so a "go" that raced
+    // the ready acknowledgement can never submit into the previous Session.
+    // Clearing an already-empty binding is a no-op.
+    await this.#state.clearSession(key);
+    return this.#enqueueMessage({
+      ...frame,
+      body: {
+        ...body,
+        msgtype: 'text',
+        text: { content: submission.prompt },
+        // The submission is dsh-im's own composition, so a quote on the
+        // "go" message itself must not become part of it.
+        quote: undefined,
+      },
+    }, messageId, key, {
+      batchSubmission: { ...submission, manager: this.#continuousInputs },
+      preparedMessage: preflight.preparedMessage,
+    });
+  }
+
+  async #prepareContinuousSubmission(result) {
+    const items = Array.isArray(result.items) ? result.items : [];
+    const limits = await (this.#harness.getImageInputLimits?.() ?? imageInputLimits());
+    const keptImages = [];
+    const keptFiles = [];
+    const failures = [];
+    for (const [index, item] of items.entries()) {
+      const content = item?.content;
+      if (!content) continue;
+      for (const image of content.images ?? []) {
+        try {
+          await image.load({ signal: this.#signal, maxBytes: limits.maxDownloadBytes });
+          keptImages.push(image);
+        } catch (error) {
+          failures.push({ index, kind: 'image', name: image?.name, error });
+        }
+      }
+      for (const file of content.files ?? []) {
+        try {
+          await file.load({ signal: this.#signal });
+          keptFiles.push(file);
+        } catch (error) {
+          failures.push({ index, kind: 'file', name: file?.name, error });
+        }
+      }
+    }
+
+    const hasText = items.some((item) => typeof item?.text === 'string' && item.text.trim());
+    const failureLines = failures.map(({ index, kind, name, error }) => {
+      const label = t('[消息 {index}]', { index: index + 1 });
+      const kindLabel = kind === 'image' ? t('图片') : t('文件');
+      const displayName = nonEmptyString(name);
+      const nameText = displayName ? t('「{name}」', { name: displayName }) : '';
+      return t('{label} 的{kind}{name}下载失败，已省略：{reason}', {
+        label,
+        kind: kindLabel,
+        name: nameText,
+        reason: mediaErrorText(error),
+      });
+    });
+    const preparedMessage = {
+      content: failureLines.length === 0
+        ? result.prompt
+        : [result.prompt, '', t('[附件下载失败]'), ...failureLines].join('\n'),
+      images: keptImages,
+      files: keptFiles,
+    };
+    const notice = failures.length === 0 ? null : [
+      t('有 {count} 个附件下载失败，已从本次提交中省略：', { count: failures.length }),
+      ...failureLines,
+      t('如需这些附件，请重新发送对应消息后再次发送 go；要放弃本批请发送 cancel。'),
+    ].join('\n');
+    return {
+      ok: hasText || keptImages.length > 0 || keptFiles.length > 0,
+      preparedMessage,
+      notice,
+    };
+  }
+
   #enqueueMessage(frame, messageId, key, {
     releaseMessageId = true,
     alreadyRecorded = false,
     batchSubmission = null,
+    preparedMessage = null,
   } = {}) {
-    // WeCom image URLs expire after five minutes, while a conversation turn
-    // may legally stay queued longer. Start the authenticated SDK download as
-    // soon as the validated callback is accepted, then consume it in order.
-    const inboundMessage = wecomInboundMessage(frame, this.#client);
-    const directCount = inboundMessage.images.length;
-    const quoteContents = isSharedLocalCommand(inboundMessage.content, {
-      hasImages: hasInboundImages(inboundMessage),
-      hasFiles: hasInboundFiles(inboundMessage),
-    }) ? [] : imageContents(bodyOf(frame).quote);
-    const quotedImages = quoteContents.map((image) => imageSource(this.#client, image)).filter(Boolean);
-    const combinedMessage = { ...inboundMessage, images: [...inboundMessage.images, ...quotedImages] };
-    const imageCount = combinedMessage.images.length;
+    let prepared = preparedMessage;
     let reservedImages = 0;
-    let preparedMessage = combinedMessage;
-    if (imageCount > 0) {
-      if (this.#prefetchedImageCount + imageCount <= MAX_PREFETCHED_IMAGES) {
-        reservedImages = imageCount;
-        this.#prefetchedImageCount += reservedImages;
-        preparedMessage = prefetchInboundImages(combinedMessage, this.#signal,
-          this.#harness.getImageInputLimits?.() ?? imageInputLimits());
-      } else {
-        preparedMessage = imageQueueFullMessage(combinedMessage);
+    let directCount = 0;
+    let quoteContents = [];
+    let quotedImages = [];
+    if (!prepared) {
+      // WeCom image URLs expire after five minutes, while a conversation turn
+      // may legally stay queued longer. Start the authenticated SDK download as
+      // soon as the validated callback is accepted, then consume it in order.
+      const inboundMessage = wecomInboundMessage(frame, this.#client);
+      directCount = inboundMessage.images.length;
+      quoteContents = isSharedLocalCommand(inboundMessage.content, {
+        hasImages: hasInboundImages(inboundMessage),
+        hasFiles: hasInboundFiles(inboundMessage),
+      }) ? [] : imageContents(bodyOf(frame).quote);
+      quotedImages = quoteContents.map((image) => imageSource(this.#client, image)).filter(Boolean);
+      const combinedMessage = { ...inboundMessage, images: [...inboundMessage.images, ...quotedImages] };
+      const imageCount = combinedMessage.images.length;
+      prepared = combinedMessage;
+      if (imageCount > 0) {
+        if (this.#prefetchedImageCount + imageCount <= MAX_PREFETCHED_IMAGES) {
+          reservedImages = imageCount;
+          this.#prefetchedImageCount += reservedImages;
+          prepared = prefetchInboundImages(combinedMessage, this.#signal,
+            this.#harness.getImageInputLimits?.() ?? imageInputLimits());
+        } else {
+          prepared = imageQueueFullMessage(combinedMessage);
+        }
       }
+      // Keep quoted media separate until local command and interaction routing is done.
+      prepared = {
+        ...prepared,
+        images: prepared.images.slice(0, directCount),
+        quotedImages: prepared.images.slice(directCount),
+        missingQuotedImageCount: quoteContents.length - quotedImages.length,
+      };
+      prepared = prefetchInboundFiles(prepared, this.#signal);
     }
-    // Keep quoted media separate until local command and interaction routing is done.
-    preparedMessage = {
-      ...preparedMessage,
-      images: preparedMessage.images.slice(0, directCount),
-      quotedImages: preparedMessage.images.slice(directCount),
-      missingQuotedImageCount: quoteContents.length - quotedImages.length,
-    };
-    preparedMessage = prefetchInboundFiles(preparedMessage, this.#signal);
     const previous = this.#queues.get(key) ?? Promise.resolve();
     const current = previous
       .catch(() => undefined)
       .then(() => this.#process(frame, {
         alreadyRecorded,
-        preparedMessage,
+        preparedMessage: prepared,
         batchSubmission,
       }))
       .finally(() => {
@@ -1484,7 +1877,7 @@ export class WecomHarnessBridge {
         },
       });
       if (batchSubmission) {
-        this.#batchInputs.complete(key, batchSubmission.token);
+        (batchSubmission.manager ?? this.#batchInputs).complete(key, batchSubmission.token);
         batchSettled = true;
       }
 
@@ -1557,10 +1950,11 @@ export class WecomHarnessBridge {
     } catch (error) {
       let batchFailureMessage = null;
       if (!batchSettled && batchSubmission) {
+        const batchManager = batchSubmission.manager ?? this.#batchInputs;
         if (error?.code === 'turn-stopped') {
-          this.#batchInputs.complete(key, batchSubmission.token);
+          batchManager.complete(key, batchSubmission.token);
         } else {
-          batchFailureMessage = this.#batchInputs.fail(key, batchSubmission.token).message ?? null;
+          batchFailureMessage = batchManager.fail(key, batchSubmission.token).message ?? null;
         }
         batchSettled = true;
       }
