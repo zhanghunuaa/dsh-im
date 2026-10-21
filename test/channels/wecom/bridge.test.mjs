@@ -795,7 +795,11 @@ test('Enterprise WeChat messages stream Harness progress and finalize once', asy
       createSession: async () => 'session-new',
       ensureRunning: async () => true,
       ask: async (_session, _text, { onUpdate }) => {
-        await onUpdate({ type: 'tool', name: '网页搜索' });
+        await onUpdate({
+          type: 'tool',
+          name: '网页搜索',
+          arguments: JSON.stringify({ query: 'GB 4789.2 菌落总数' }),
+        });
         await onUpdate({ type: 'status', text: '正在整理结果…' });
         await onUpdate({ type: 'text', text: '回答中' });
         return '最终回答';
@@ -805,21 +809,17 @@ test('Enterprise WeChat messages stream Harness progress and finalize once', asy
   });
 
   await bridge.accept(frame());
-  assert.deepEqual(replies, [
-    { streamId: 'stream-1', content: INITIAL_THINKING_STREAM, finish: false },
-    { streamId: 'stream-1', content: '<think>正在使用网页搜索…', finish: false },
-    { streamId: 'stream-1', content: '<think>正在整理结果…', finish: false },
-    {
-      streamId: 'stream-1',
-      content: streamPreview('回答中', '正在整理结果…'),
-      finish: false,
-    },
-    {
-      streamId: 'stream-1',
-      content: '最终回答',
-      finish: true,
-    },
-  ]);
+  assert.equal(replies.length, 5);
+  assert.deepEqual(replies[0], { streamId: 'stream-1', content: INITIAL_THINKING_STREAM, finish: false });
+  // Progress now names the concrete step (tool name + its arguments) and the
+  // elapsed time; the elapsed value itself depends on the clock.
+  assert.equal(replies[1].finish, false);
+  assert.match(replies[1].content, /^<think>已运行 [^\n]+\n1\. 正在使用网页搜索: GB 4789\.2 菌落总数…$/u);
+  assert.equal(replies[2].finish, false);
+  assert.match(replies[2].content, /^<think>已运行 [^\n]+\n1\. 正在使用网页搜索: GB 4789\.2 菌落总数…\n正在整理结果…$/u);
+  assert.equal(replies[3].finish, false);
+  assert.match(replies[3].content, /^<think>已运行 [^\n]+\n1\. 正在使用网页搜索: GB 4789\.2 菌落总数…\n正在整理结果…<\/think>\n回答中$/u);
+  assert.deepEqual(replies[4], { streamId: 'stream-1', content: '最终回答', finish: true });
   assert.deepEqual(active, []);
   assert.equal(store.seen.has('msg-1'), true);
   assert.equal(bridge.status.messagesReplied, 1);

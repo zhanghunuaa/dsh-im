@@ -111,4 +111,6 @@ export default {
   '连续消息收集仅支持私聊，请在与机器人的私聊中使用。': 'Continuous message collection is only available in direct chats with the bot.',
   '连续消息收集请发送 cancel（不带斜杠）取消，或发送 go 提交。': 'To cancel continuous message collection, send cancel (without the slash), or send go to submit.',
   '（本条为附件消息，附件已按顺序附在本次输入中。）': '(This is an attachment message; its attachments are included in this input in order.)',
+  // Detailed stream progress (elapsed time header)
+  '已运行 {elapsed}': 'Running for {elapsed}',
 };

@@ -553,9 +553,41 @@ function splitUtf8(text, maxBytes = MAX_REPLY_BYTES) {
   return chunks;
 }
 
-function thinkingProgressText(update) {
-  if (update?.type === 'tool') return t('正在使用{name}…', { name: update.name });
-  return update?.text;
+// Progress shown in WeCom's <think> area. The harness delivers tool updates
+// with the JSON arguments, so name the actual action (command, path, query)
+// instead of only the tool. Keep every line short: stream frames are transient
+// and WeCom refreshes them frequently.
+function squashProgressText(value, limit = 160) {
+  const text = String(value ?? '').replace(/\s+/gu, ' ').trim();
+  if (!text) return '';
+  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+}
+
+function toolProgressSummary(raw) {
+  if (typeof raw !== 'string' || !raw.trim()) return '';
+  let parsed = null;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = null;
+  }
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    for (const key of ['command', 'cmd', 'commandLine', 'script', 'path', 'file_path',
+      'filePath', 'target', 'pattern', 'query', 'url', 'description', 'prompt', 'text']) {
+      const value = parsed[key];
+      if (typeof value === 'string' && value.trim()) return squashProgressText(value, 160);
+    }
+    const first = Object.values(parsed).find((value) => typeof value === 'string' && value.trim());
+    if (first) return squashProgressText(first, 120);
+  }
+  return squashProgressText(raw, 120);
+}
+
+function formatProgressElapsed(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = String(total % 60).padStart(2, '0');
+  return minutes > 0 ? `${minutes}m${seconds}s` : `${total}s`;
 }
 
 function streamContent(thinkingText, answerText = '', { finish = false } = {}) {
@@ -1755,6 +1787,35 @@ export class WecomHarnessBridge {
     let streamThinkingText = t('正在思考中…');
     let streamAnswerText = '';
     let batchSettled = batchSubmission === null;
+    // Progress trail for the WeCom <think> area: elapsed time plus the latest
+    // concrete steps (tool name and its command/path/query).
+    const turnStartedAt = Date.now();
+    let progressStep = 0;
+    const progressTrail = [];
+    const rememberProgress = (line) => {
+      if (!line || progressTrail.at(-1) === line) return;
+      progressTrail.push(line);
+      while (progressTrail.length > 3) progressTrail.shift();
+    };
+    const composeProgress = () => [
+      t('已运行 {elapsed}', { elapsed: formatProgressElapsed(Date.now() - turnStartedAt) }),
+      ...progressTrail,
+    ].join('\n');
+    const applyProgress = (update) => {
+      if (!update) return;
+      if (update.type === 'tool') {
+        progressStep += 1;
+        const name = update.name ?? t('工具');
+        const summary = toolProgressSummary(update.arguments);
+        rememberProgress(`${progressStep}. ${t('正在使用{name}…', {
+          name: summary ? `${name}: ${summary}` : name,
+        })}`);
+        return;
+      }
+      if (typeof update.text === 'string' && update.text.trim() && update.type !== 'text') {
+        rememberProgress(squashProgressText(update.text, 200));
+      }
+    };
     let promptRecorded = false;
     try {
       if (!text && !hasImages && !hasFiles && !hasReply) {
@@ -1857,8 +1918,9 @@ export class WecomHarnessBridge {
                 if (update?.type === 'text') {
                   streamAnswerText = update.text;
                 } else {
-                  streamThinkingText = thinkingProgressText(update) || streamThinkingText;
+                  applyProgress(update);
                 }
+                streamThinkingText = composeProgress();
                 const preview = splitUtf8(
                   streamContent(streamThinkingText, streamAnswerText),
                 )[0];
