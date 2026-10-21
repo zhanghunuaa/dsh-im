@@ -134,37 +134,28 @@ test('the action is limited to dsh-im bundle and component details', async (t) =
   assert.equal(renderer.root.findAllByType('button').length, 1);
 });
 
-test('sidebar opens the existing main panel with a regular-weight linked-bubble icon at the requested size', async (t) => {
+test('the panel registers no left-sidebar entry and keeps the detail action', async (t) => {
   const host = await start(t);
   await host.provideNavigation();
-  const { options } = host.slots.entries.get('sidebar.panellist');
-  assert.equal(options.id, host.slots.entries.get('main').options.key);
-  assert.equal(options.label(), 'IM机器人');
+  assert.equal(host.slots.entries.has('sidebar.panellist'), false, 'the sidebar entry is intentionally removed');
+  assert.ok(host.slots.entries.has('main'));
   assert.ok(host.slots.entries.has('plugins.detail.actions'));
-  let renderer;
-  t.after(() => act(() => renderer?.unmount()));
-  for (const size of [16, 18]) {
-    act(() => { renderer = create(host.element('sidebar.panellist', { size })); });
-    const icon = renderer.root.findByType('svg');
-    assert.equal(icon.props['aria-hidden'], true);
-    assert.equal(icon.props.width, size);
-    assert.equal(icon.props.height, size);
-    assert.equal(icon.props.stroke, 'currentColor');
-    assert.equal(icon.props.strokeWidth, 1);
-    act(() => renderer.unmount());
-  }
-  assert.equal(host.renders, 0, 'the sidebar must not mount a second management panel');
-  host.slots.declare('sidebar.panellist', false);
-  assert.equal(host.slots.entries.size, 2, 'original main panel and details action remain available');
+  assert.equal(host.slots.entries.size, 2);
+  assert.equal(host.renders, 0, 'registration must not mount the management panel');
   host.slots.declare('sidebar.panellist', true);
-  assert.equal(host.slots.entries.size, 3);
+  assert.equal(host.slots.entries.size, 2, 'declaring the sidebar slot must not create an entry');
+  assert.deepEqual(
+    [...host.slots.waiting].map((item) => item.name).sort(),
+    ['main', 'plugins.detail.actions'],
+    'no sidebar injection is kept',
+  );
 });
 
 test('optional services can arrive late and withdrawing navigation removes all entries', async (t) => {
   const host = await start(t);
   assert.equal(host.slots.entries.size, 0);
   const navigation = await host.provideNavigation();
-  assert.equal(host.slots.entries.size, 3);
+  assert.equal(host.slots.entries.size, 2);
   await navigation.dispose();
   await flush();
   assert.equal(host.slots.entries.size, 0);
@@ -180,11 +171,11 @@ test('slot withdrawal and plugin disposal cancel active registrations and pendin
   host.slots.declare('plugins.detail.actions', true);
   assert.equal(host.slots.entries.size, 2);
   host.slots.declare('sidebar.panellist', true);
-  assert.equal(host.slots.entries.size, 3);
+  assert.equal(host.slots.entries.size, 2);
   host.slots.declare('main', false);
   assert.equal(host.slots.entries.size, 0);
   host.slots.declare('main', true);
-  assert.equal(host.slots.entries.size, 3);
+  assert.equal(host.slots.entries.size, 2);
   host.slots.declare('plugins.detail.actions', false);
   await host.plugin.dispose();
   host.slots.declare('plugins.detail.actions', true);

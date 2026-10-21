@@ -45,12 +45,11 @@ export function installImPluginPage(ctx, { packageName, renderPanel }) {
           onBack: () => pageCtx.pluginNavigation.openBundle(packageName),
         }),
       }, ImPluginPage);
-      const stopSidebar = pageCtx.slots.inject('sidebar.panellist', () =>
-        pageCtx.slots.register({
-          name: 'sidebar.panellist', id: IM_MAIN_PANEL_ID,
-          order: 10, label: () => pageCtx.locale.bind(IM_LOCALE_NAMESPACE)('IM机器人'),
-          locale: IM_LOCALE_NAMESPACE,
-        }, ImSidebarIcon));
+      // The IM panel deliberately keeps no left-sidebar entry: this deployment
+      // reaches it from the plugin detail page and DSH settings instead, and the
+      // sidebar row is removed on request. ImSidebarIcon stays for the settings
+      // and plugin-detail entrances that still reference it.
+      const stopSidebar = () => {};
       const stopActions = pageCtx.slots.inject('plugins.detail.actions', () =>
         pageCtx.slots.register({
           name: 'plugins.detail.actions', id: 'xmanrui-dsh-im-open',
