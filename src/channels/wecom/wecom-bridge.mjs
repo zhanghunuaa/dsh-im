@@ -88,7 +88,7 @@ function helpText() {
   return [
     t('企业微信机器人已连接 DeepSeek Harness。'),
     '',
-    t('直接发送文字、图片或文件即可继续当前会话。'),
+    t('直接发送文字、图片、文件或视频即可继续当前会话。'),
     t('/menu 或 /m  打开可点击的功能菜单'),
     t('/new  开启一个全新会话'),
     t('/compact  压缩当前会话的较早上下文'),
@@ -192,6 +192,12 @@ function messageContentText(body) {
     text = typeof body.text?.content === 'string' ? body.text.content.trim() : '';
   } else if (body.msgtype === 'voice') {
     text = typeof body.voice?.content === 'string' ? body.voice.content.trim() : '';
+  } else if (body.msgtype === 'video') {
+    // The video binary arrives as `video.url` + `video.aeskey`; the label keeps
+    // the message non-empty so a video-only message is never answered with the
+    // generic "unsupported type" notice. The downloaded file is attached
+    // through `files` in wecomInboundMessage().
+    text = t('[视频]');
   } else if (body.msgtype === 'mixed' && Array.isArray(body.mixed?.msg_item)) {
     text = body.mixed.msg_item
       .filter((item) => item?.msgtype === 'text' && typeof item.text?.content === 'string')
@@ -258,6 +264,17 @@ function fileContents(frame) {
   const items = mergedForwardItems(body);
   return items
     ? items.filter((item) => item?.msgtype === 'file' && item.file).map((item) => item.file)
+    : [];
+}
+
+function videoContents(frame) {
+  const body = bodyOf(frame);
+  if (body.msgtype === 'video' && body.video && typeof body.video === 'object') {
+    return [body.video];
+  }
+  const items = mergedForwardItems(body);
+  return items
+    ? items.filter((item) => item?.msgtype === 'video' && item.video).map((item) => item.video)
     : [];
 }
 
@@ -345,13 +362,45 @@ function fileSource(client, file) {
   };
 }
 
+function videoSource(client, video) {
+  const url = nonEmptyString(video?.url);
+  if (!url) return null;
+  const aeskey = nonEmptyString(video?.aeskey) ?? undefined;
+  return {
+    // WeCom's video payload carries no filename, so keep a stable extension for
+    // the staged workspace file; stageInboundFiles() prefixes the index.
+    name: nonEmptyString(video?.filename ?? video?.file_name ?? video?.name) ?? 'video.mp4',
+    mediaType: 'video/mp4',
+    async load({ signal } = {}) {
+      signal?.throwIfAborted();
+      if (typeof client?.downloadFile !== 'function') {
+        throw new Error('Enterprise WeChat video download is unavailable');
+      }
+      const result = await client.downloadFile(url, aeskey);
+      signal?.throwIfAborted();
+      const raw = result?.buffer ?? result?.data;
+      if (!Buffer.isBuffer(raw) && !(raw instanceof Uint8Array)) {
+        throw new Error('Enterprise WeChat video download returned no data');
+      }
+      return {
+        data: Buffer.from(raw),
+        name: nonEmptyString(result?.filename) ?? 'video.mp4',
+        mediaType: 'video/mp4',
+      };
+    },
+  };
+}
+
 export function wecomInboundMessage(frame, client) {
   const body = bodyOf(frame);
   const replyTo = replyReferenceForBody(body);
   return {
     content: messageText(frame),
     images: imageContents(body).map((image) => imageSource(client, image)).filter(Boolean),
-    files: fileContents(frame).map((file) => fileSource(client, file)).filter(Boolean),
+    files: [
+      ...fileContents(frame).map((file) => fileSource(client, file)),
+      ...videoContents(frame).map((video) => videoSource(client, video)),
+    ].filter(Boolean),
     ...(replyTo ? { replyTo } : {}),
   };
 }
@@ -682,7 +731,7 @@ async function sendWecomMedia(
   chatId,
   file,
   mediaType,
-  { signal, timeoutMs = DEFAULT_FILE_UPLOAD_TIMEOUT_MS } = {},
+  { signal, timeoutMs = DEFAULT_FILE_UPLOAD_TIMEOUT_MS, videoOptions } = {},
 ) {
   signal?.throwIfAborted();
   if (typeof client?.uploadMedia !== 'function'
@@ -717,7 +766,12 @@ async function sendWecomMedia(
 
   let sent;
   try {
-    const pending = client.sendMediaMessage(chatId, mediaType, mediaId);
+    const pending = client.sendMediaMessage(
+      chatId,
+      mediaType,
+      mediaId,
+      mediaType === 'video' ? videoOptions : undefined,
+    );
     trackOutboundArtifactProviderPromise(file, pending);
     sent = await waitWithSignal(pending, waitSignal);
   } catch (error) {
@@ -740,6 +794,11 @@ export function sendWecomImage(client, chatId, file, options) {
 
 function sendWecomFile(client, chatId, file, options) {
   return sendWecomMedia(client, chatId, file, 'file', options);
+}
+
+/** Send one materialized artifact through Enterprise WeChat's native video message. */
+export function sendWecomVideo(client, chatId, file, options) {
+  return sendWecomMedia(client, chatId, file, 'video', options);
 }
 
 function answerTextForDelivery(answer, artifacts) {
@@ -1739,6 +1798,11 @@ export class WecomHarnessBridge {
         signal: this.#signal,
         timeoutMs: this.#fileUploadTimeoutMs,
       }),
+      sendVideo: (file) => sendWecomVideo(this.#client, chatId, file, {
+        signal: this.#signal,
+        timeoutMs: this.#fileUploadTimeoutMs,
+        videoOptions: { title: file.fileName },
+      }),
       onFailure: (artifact, error) => setLastMessageFailure(this.#status, error, {
         userMessage: artifactFailureText(artifact?.fileName, error),
         reason: error?.code,
@@ -1819,7 +1883,7 @@ export class WecomHarnessBridge {
     let promptRecorded = false;
     try {
       if (!text && !hasImages && !hasFiles && !hasReply) {
-        await this.#sendImmediate(frame, chatId, t('目前支持文字、图片、文件和语音转写消息。'));
+        await this.#sendImmediate(frame, chatId, t('目前支持文字、图片、文件、视频和语音转写消息。'));
         await this.#state.markSeen(messageId);
         return;
       }

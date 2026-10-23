@@ -9,6 +9,7 @@ export const OUTBOUND_ARTIFACT_TOOL = 'dsh_im_return_file';
 const ARTIFACT_KIND = 'dsh-im-outbound-artifact';
 const ARTIFACT_READ_CHUNK_BYTES = 64 * 1024;
 const MIME_BY_EXTENSION = new Map([
+  ['.avi', 'video/x-msvideo'],
   ['.csv', 'text/csv'],
   ['.doc', 'application/msword'],
   ['.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
@@ -17,11 +18,16 @@ const MIME_BY_EXTENSION = new Map([
   ['.jpeg', 'image/jpeg'],
   ['.jpg', 'image/jpeg'],
   ['.json', 'application/json'],
+  ['.m4v', 'video/x-m4v'],
   ['.md', 'text/markdown'],
+  ['.mkv', 'video/x-matroska'],
+  ['.mov', 'video/quicktime'],
+  ['.mp4', 'video/mp4'],
   ['.pdf', 'application/pdf'],
   ['.png', 'image/png'],
   ['.rar', 'application/vnd.rar'],
   ['.txt', 'text/plain'],
+  ['.webm', 'video/webm'],
   ['.webp', 'image/webp'],
   ['.xls', 'application/vnd.ms-excel'],
   ['.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],

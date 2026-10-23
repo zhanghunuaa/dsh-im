@@ -36,6 +36,7 @@ function providerIds(value) {
 async function sendMaterializedArtifact(file, {
   sendFile,
   sendImage,
+  sendVideo,
   signal,
 }) {
   if (file.mediaType?.startsWith('image/') && typeof sendImage === 'function') {
@@ -43,6 +44,18 @@ async function sendMaterializedArtifact(file, {
       return {
         presentation: 'image',
         result: await sendImage(file),
+      };
+    } catch (error) {
+      if (isAbort(error, signal) || error?.code === 'artifact-delivery-uncertain') {
+        throw error;
+      }
+    }
+  }
+  if (file.mediaType?.startsWith('video/') && typeof sendVideo === 'function') {
+    try {
+      return {
+        presentation: 'video',
+        result: await sendVideo(file),
       };
     } catch (error) {
       if (isAbort(error, signal) || error?.code === 'artifact-delivery-uncertain') {
@@ -72,6 +85,7 @@ export async function deliverOutboundArtifacts({
   signal,
   sendFile,
   sendImage,
+  sendVideo,
   sendFailureNotice,
   onFailure,
   logger,
@@ -94,6 +108,7 @@ export async function deliverOutboundArtifacts({
         const sent = await sendMaterializedArtifact(file, {
           sendFile,
           sendImage,
+          sendVideo,
           signal,
         });
         signal?.throwIfAborted();

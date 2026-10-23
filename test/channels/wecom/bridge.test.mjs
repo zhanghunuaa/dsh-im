@@ -8,6 +8,7 @@ import test from 'node:test';
 import {
   createWecomBridgeStatus,
   sendWecomImage,
+  sendWecomVideo,
   WecomHarnessBridge,
   wecomInboundMessage,
 } from '../../../src/channels/wecom/wecom-bridge.mjs';
@@ -95,6 +96,41 @@ test('Enterprise WeChat native image adapter marks an unacknowledged message as 
   }, { timeoutMs: 20 }), (error) => error.code === 'artifact-delivery-uncertain');
 });
 
+test('Enterprise WeChat native video adapter uploads and sends a video media message', async () => {
+  const calls = [];
+  const result = { body: { msgid: 'wecom-video-1', errcode: 0 } };
+  const file = {
+    artifactId: 'video-artifact',
+    deliveryKey: 'video-delivery',
+    fileName: 'clip.mp4',
+    mediaType: 'video/mp4',
+    bytes: Buffer.from('video-bytes'),
+  };
+  const returned = await sendWecomVideo({
+    uploadMedia: async (bytes, options) => {
+      calls.push({ operation: 'upload', bytes: Buffer.from(bytes), options });
+      return { media_id: 'video-media-1' };
+    },
+    sendMediaMessage: async (chatId, type, mediaId, videoOptions) => {
+      calls.push({ operation: 'send', chatId, type, mediaId, videoOptions });
+      return result;
+    },
+  }, 'chat-1', file, { videoOptions: { title: 'clip.mp4' } });
+
+  assert.equal(returned, result);
+  assert.deepEqual(calls, [{
+    operation: 'upload',
+    bytes: Buffer.from('video-bytes'),
+    options: { type: 'video', filename: 'clip.mp4' },
+  }, {
+    operation: 'send',
+    chatId: 'chat-1',
+    type: 'video',
+    mediaId: 'video-media-1',
+    videoOptions: { title: 'clip.mp4' },
+  }]);
+});
+
 test('Enterprise WeChat sends an image artifact as a native image message', async (t) => {
   const artifact = await committedArtifact(t, 'native.png', PNG_1X1, 'native-image');
   const uploads = [];
@@ -140,6 +176,53 @@ test('Enterprise WeChat sends an image artifact as a native image message', asyn
   assert.equal(receipt.artifacts[0].artifactId, artifact.artifactId);
   assert.equal(receipt.artifacts[0].outcome, 'sent');
   assert.equal(receipt.providerMessageIds.includes('wecom-image'), true);
+});
+
+test('Enterprise WeChat sends a video artifact as a native video message', async (t) => {
+  const artifact = await committedArtifact(t, 'clip.mp4', Buffer.from('native-video'), 'native-video');
+  const uploads = [];
+  const messages = [];
+  const bridge = new WecomHarnessBridge({
+    client: {
+      replyStream: async (_source, _streamId, _content, finish) => (
+        finish ? { body: { msgid: 'wecom-video-text' } } : undefined
+      ),
+      replyStreamNonBlocking: async () => {},
+      sendMessage: async () => {},
+      uploadMedia: async (bytes, options) => {
+        uploads.push({ bytes: Buffer.from(bytes), options });
+        return { media_id: 'native-video-media' };
+      },
+      sendMediaMessage: async (chatId, type, mediaId, videoOptions) => {
+        messages.push({ chatId, type, mediaId, videoOptions });
+        return { body: { msgid: 'wecom-video', errcode: 0 } };
+      },
+    },
+    generateStreamId: () => 'native-video-stream',
+    harness: {
+      sessionExists: async () => true,
+      ask: async (_sessionId, _text, options) => {
+        await options.onArtifact(artifact);
+        return '视频已生成。';
+      },
+    },
+    state: state(),
+  });
+
+  const receipt = await bridge.accept(frame({ msgid: 'wecom-native-video' }));
+
+  assert.deepEqual(uploads, [{
+    bytes: Buffer.from('native-video'),
+    options: { type: 'video', filename: 'clip.mp4' },
+  }]);
+  assert.deepEqual(messages, [{
+    chatId: 'member-1',
+    type: 'video',
+    mediaId: 'native-video-media',
+    videoOptions: { title: 'clip.mp4' },
+  }]);
+  assert.equal(receipt.artifacts[0].outcome, 'sent');
+  assert.equal(receipt.providerMessageIds.includes('wecom-video'), true);
 });
 
 test('Enterprise WeChat falls back to a file after a definite native-image rejection', async (t) => {
@@ -1126,6 +1209,81 @@ test('Enterprise WeChat exposes native file callbacks through the SDK downloader
     url: 'https://wecom.example/encrypted-file',
     aeskey: 'file-specific-key',
   }]);
+});
+
+test('Enterprise WeChat exposes native video callbacks through the SDK downloader', async () => {
+  const calls = [];
+  const bytes = Buffer.from('wecom-native-video');
+  const message = wecomInboundMessage(frame({
+    msgid: 'wecom-video-normalize',
+    msgtype: 'video',
+    text: undefined,
+    video: {
+      url: 'https://wecom.example/encrypted-video',
+      aeskey: 'video-specific-key',
+    },
+  }), {
+    downloadFile: async (url, aeskey) => {
+      calls.push({ url, aeskey });
+      return { buffer: bytes };
+    },
+  });
+
+  assert.equal(message.content, '[视频]');
+  assert.deepEqual(message.images, []);
+  assert.equal(message.files.length, 1);
+  assert.equal(message.files[0].name, 'video.mp4');
+  assert.equal(message.files[0].mediaType, 'video/mp4');
+  assert.equal(calls.length, 0, 'video download stays lazy at normalization time');
+  assert.deepEqual(await message.files[0].load({}), {
+    data: bytes,
+    name: 'video.mp4',
+    mediaType: 'video/mp4',
+  });
+  assert.deepEqual(calls, [{
+    url: 'https://wecom.example/encrypted-video',
+    aeskey: 'video-specific-key',
+  }]);
+});
+
+test('Enterprise WeChat runs a turn for a video message instead of the unsupported notice', async () => {
+  const transport = testClient();
+  const downloads = [];
+  transport.client.downloadFile = async (url, aeskey) => {
+    downloads.push({ url, aeskey });
+    return { buffer: Buffer.from('video-bytes') };
+  };
+  let promptText;
+  let promptFiles;
+  const bridge = new WecomHarnessBridge({
+    client: transport.client,
+    generateStreamId: () => 'video-stream',
+    harness: {
+      sessionExists: async () => true,
+      ask: async (_sessionId, prompt, options) => {
+        promptText = prompt;
+        promptFiles = options.files;
+        return '已收到视频';
+      },
+    },
+    state: state(),
+  });
+
+  await bridge.accept(frame({
+    msgid: 'wecom-video-inbound',
+    msgtype: 'video',
+    text: undefined,
+    video: {
+      url: 'https://wecom.example/encrypted-video',
+      aeskey: 'video-key',
+    },
+  }));
+
+  assert.equal(promptText, '[视频]');
+  assert.equal(promptFiles.length, 1);
+  assert.equal(promptFiles[0].name, 'video.mp4');
+  assert.equal(downloads.length, 1);
+  assert.equal(transport.streamed.at(-1).content.includes('已收到视频'), true);
 });
 
 test('Enterprise WeChat applies the unified access policy before attachments or Harness work', async () => {

@@ -106,6 +106,67 @@ test('image artifacts prefer the native image sender', async (t) => {
   await assertReleased(artifact);
 });
 
+test('video artifacts prefer the native video sender', async (t) => {
+  const artifact = await committedArtifact(t, 'clip.mp4', Buffer.from([1, 2, 3]));
+  const calls = [];
+
+  const delivery = await deliverOutboundArtifacts({
+    artifacts: [artifact],
+    channelKey: 'test',
+    sendVideo: async (file) => {
+      calls.push(`video:${file.mediaType}`);
+      return { id: 'video-1' };
+    },
+    sendFile: async () => calls.push('file'),
+  });
+
+  assert.deepEqual(calls, ['video:video/mp4']);
+  assert.equal(delivery.receipt.presentation, 'test-video');
+  assert.deepEqual(delivery.receipt.providerMessageIds, ['video-1']);
+  assert.equal(delivery.artifactsSent, 1);
+  await assertReleased(artifact);
+});
+
+test('a video falls back to file delivery after a definite native-video rejection', async (t) => {
+  const artifact = await committedArtifact(t, 'clip.mov', Buffer.from([1]));
+  const calls = [];
+
+  const delivery = await deliverOutboundArtifacts({
+    artifacts: [artifact],
+    channelKey: 'test',
+    sendVideo: async () => {
+      calls.push('video-rejected');
+      throw rejected('artifact-provider-rejected');
+    },
+    sendFile: async (file) => {
+      calls.push(`file:${file.fileName}`);
+      return { id: 'file-1' };
+    },
+  });
+
+  assert.deepEqual(calls, ['video-rejected', 'file:clip.mov']);
+  assert.equal(delivery.receipt.presentation, 'test-file');
+  await assertReleased(artifact);
+});
+
+test('a video uses file delivery when the channel has no video sender', async (t) => {
+  const artifact = await committedArtifact(t, 'clip.webm', Buffer.from([1]));
+  let fileCalls = 0;
+
+  const delivery = await deliverOutboundArtifacts({
+    artifacts: [artifact],
+    channelKey: 'test',
+    sendFile: async () => {
+      fileCalls += 1;
+      return { id: 'file-1' };
+    },
+  });
+
+  assert.equal(fileCalls, 1);
+  assert.equal(delivery.receipt.presentation, 'test-file');
+  await assertReleased(artifact);
+});
+
 test('an image uses file delivery when the channel has no image sender', async (t) => {
   const artifact = await committedArtifact(t, 'result.jpg', Buffer.from([1]));
   let fileCalls = 0;

@@ -117,13 +117,15 @@ export default {
   '目前支持文字和图片消息。': 'Only text and image messages are supported at the moment.',
   '目前支持文字、图片和文件消息。':
     'Only text, image, and file messages are supported at the moment.',
-  '目前支持文字、图片、文件和语音转写消息。':
-    'Only text, image, file, and voice-transcription messages are supported at the moment.',
+  '目前支持文字、图片、文件、视频和语音转写消息。':
+    'Only text, image, file, video, and voice-transcription messages are supported at the moment.',
   '目前支持文字、图片、文件，以及微信已转成文字的语音消息。':
     'Only text, image, file, and voice messages already transcribed to text by WeChat are supported at the moment.',
   '直接发送文字或图片即可继续当前会话。': 'Send text or an image directly to continue the current session.',
   '直接发送文字、图片或文件即可继续当前会话。':
     'Send text, an image, or a file directly to continue the current session.',
+  '直接发送文字、图片、文件或视频即可继续当前会话。':
+    'Send text, an image, a file, or a video directly to continue the current session.',
   '直接发送文字、图片、文件或带文字识别结果的语音即可继续当前会话。':
     'Send text, an image, a file, or a voice message already transcribed to text to continue the current session.',
   '{label}机器人已连接 DeepSeek Harness。': 'The {label} bot is connected to DeepSeek Harness.',
