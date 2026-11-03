@@ -103,6 +103,9 @@ export function createImHostPlugin(internals = {}) {
           send: (botId, targetId, text, options) => (
             deliveryService.send(botId, targetId, text, options)
           ),
+          sendFile: (botId, targetId, media, options) => (
+            deliveryService.sendFile(botId, targetId, media, options)
+          ),
           listTargets: async (botId) => (await deliveryService.listTargets(botId)).targets,
           listBots: () => deliveryService.listBots(),
         }));

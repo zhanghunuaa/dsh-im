@@ -792,7 +792,7 @@ export function sendWecomImage(client, chatId, file, options) {
   return sendWecomMedia(client, chatId, file, 'image', options);
 }
 
-function sendWecomFile(client, chatId, file, options) {
+export function sendWecomFile(client, chatId, file, options) {
   return sendWecomMedia(client, chatId, file, 'file', options);
 }
 

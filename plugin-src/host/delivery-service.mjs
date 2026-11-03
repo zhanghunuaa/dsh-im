@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { readFileSync, statSync } from 'node:fs';
+import { basename, isAbsolute } from 'node:path';
 import { normalizeDeliveryTarget } from './delivery-adapter.mjs';
 import { COMPETITIVE_APPROVAL_CHANNELS } from '../../src/channels/shared/harness-approval.mjs';
 import { t } from '../../src/channels/shared/i18n.mjs';
@@ -7,6 +9,7 @@ const BOT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const TARGET_ID_PATTERN = /^[A-Za-z0-9._:@-]{1,128}$/;
 const CHANNEL_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
 const DRAFT_TARGET_ID = '__test__';
+const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
 
 const ADAPTER_METHODS = Object.freeze([
   'ownsBot',
@@ -29,6 +32,9 @@ const DELIVERY_ERROR_CODES = new Set([
   'unknown-target',
   'target-conflict',
   'invalid-target',
+  'media-invalid',
+  'media-too-large',
+  'media-unsupported',
   'bot-not-connected',
   'target-rejected',
   'delivery-failed',
@@ -96,6 +102,49 @@ function draftTargetObject(value) {
 
 function cancellation(signal) {
   if (signal?.aborted) throw deliveryError('cancelled', 'Request cancelled');
+}
+
+function mediaSource(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw deliveryError('media-invalid', 'Invalid media description');
+  }
+  const mediaPath = typeof value.mediaPath === 'string' ? value.mediaPath.trim() : '';
+  if (!mediaPath || !isAbsolute(mediaPath)) {
+    throw deliveryError('media-invalid', 'mediaPath must be an absolute path');
+  }
+  const rawName = typeof value.fileName === 'string' ? value.fileName.trim() : '';
+  if (rawName.length > 200 || /[\\/\u0000-\u001f]/.test(rawName)) {
+    throw deliveryError('media-invalid', 'fileName must be a plain file name');
+  }
+  return { mediaPath, fileName: rawName };
+}
+
+function readMediaFile({ mediaPath, fileName }) {
+  let stats;
+  try {
+    stats = statSync(mediaPath);
+  } catch {
+    throw deliveryError('media-invalid', 'mediaPath cannot be read');
+  }
+  if (!stats.isFile()) throw deliveryError('media-invalid', 'mediaPath must be a regular file');
+  if (stats.size === 0 || stats.size > MAX_MEDIA_BYTES) {
+    throw stats.size === 0
+      ? deliveryError('media-invalid', 'mediaPath must not be empty')
+      : deliveryError('media-too-large', 'File exceeds the proactive media size limit');
+  }
+  let bytes;
+  try {
+    bytes = readFileSync(mediaPath);
+  } catch {
+    throw deliveryError('media-invalid', 'mediaPath cannot be read');
+  }
+  if (bytes.length === 0) {
+    throw deliveryError('media-invalid', 'mediaPath must not be empty');
+  }
+  if (bytes.length > MAX_MEDIA_BYTES) {
+    throw deliveryError('media-too-large', 'File exceeds the proactive media size limit');
+  }
+  return { bytes, fileName: fileName || basename(mediaPath), size: bytes.length };
 }
 
 function publicOperationError(error, fallback = 'delivery-failed') {
@@ -517,6 +566,32 @@ export class DeliveryService {
         signal,
         ...(format === 'markdown' ? { format } : {}),
       });
+      return { sent: true };
+    } catch (error) {
+      if (signal?.aborted || error?.name === 'AbortError' || error?.code === 'ABORT_ERR') {
+        throw deliveryError('cancelled', 'Request cancelled', { cause: error });
+      }
+      throw publicOperationError(error);
+    }
+  }
+
+  async sendFile(botId, targetId, media, { signal } = {}) {
+    const id = botIdOf(botId);
+    const targetKey = targetIdOf(targetId);
+    const source = mediaSource(media);
+    cancellation(signal);
+    const adapter = await this.#adapterFor(id);
+    try {
+      const targets = await adapter.listTargets(id);
+      if (!Array.isArray(targets)) throw new TypeError('Adapter returned invalid targets');
+      const target = targets.find((candidate) => candidate?.targetId === targetKey);
+      if (!target) throw deliveryError('unknown-target', 'Unknown target');
+      cancellation(signal);
+      const file = readMediaFile(source);
+      if (typeof adapter.sendFile !== 'function') {
+        throw deliveryError('media-unsupported', 'This channel cannot send proactive files');
+      }
+      await adapter.sendFile(id, target, file, { signal });
       return { sent: true };
     } catch (error) {
       if (signal?.aborted || error?.name === 'AbortError' || error?.code === 'ABORT_ERR') {

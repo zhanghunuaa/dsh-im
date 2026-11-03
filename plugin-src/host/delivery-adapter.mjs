@@ -316,6 +316,16 @@ export function createDeliveryAdapter({ channel, workspaces, coreController, sta
       const result = await coreController.sendProactiveText(botId, normalized, text, options);
       return options.receipt === true ? result : { sent: true };
     },
+    async sendFile(botId, target, file, options = {}) {
+      const normalized = normalizeDeliveryTarget(channel, targetWithoutSessionSync(target));
+      if (typeof coreController.sendProactiveFile !== 'function') {
+        const error = new Error('This channel cannot send proactive files');
+        error.code = 'media-unsupported';
+        throw error;
+      }
+      await coreController.sendProactiveFile(botId, normalized, file, options);
+      return { sent: true };
+    },
     async setSessionSync(botId, targetId, enabled) {
       if (typeof workspaces.setDeliveryTargetSessionSync !== 'function') {
         throw sessionSyncUnavailable();

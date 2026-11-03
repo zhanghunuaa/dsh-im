@@ -143,6 +143,19 @@ curl --request POST \
 
 当前 HTTP 接口不包含鉴权，也不提供 CORS。只应在本机或可信网络中使用，不要直接暴露到公网。
 
+## 通过 HTTP POST 发送文件
+
+把 `text` 换成宿主上的绝对路径 `mediaPath`（可选 `fileName` 覆盖显示文件名），即走同一条投递通道发送文件：
+
+```bash
+curl --request POST http://127.0.0.1:3080/api/dsh-im/delivery/messages --header 'Content-Type: application/json' --data '{"botId":"bot_9577c8572d454122a4ef7fb4d8420a91","targetId":"release-alerts","mediaPath":"D:/reports/2026-W45.xls","fileName":"2026-W45.xls"}'
+```
+
+- 请求体只接受 `{botId, targetId, mediaPath}`，或再加一个 `fileName`；不能与 `text` 同时出现。
+- `mediaPath` 必须是宿主上的绝对路径、指向真实存在的普通文件、非空且不超过 **20 MiB**（超限返回 `media-too-large` / HTTP 413）。
+- 目前只有**企业微信智能机器人**实现了主动文件投递：文件先上传为临时素材（平台侧 3 天有效），再以原生文件消息推送。其他渠道返回 `media-unsupported`（HTTP 422）。
+- `fileName` 只用于展示，不能包含路径分隔符。
+
 ## 在同一 Host 的插件中发送
 
 消费插件声明 `dshIm` 注入后，可以直接调用共享服务，不经过 Connection RPC。
@@ -313,7 +326,7 @@ HTTP 协议层还可能返回 `method-not-allowed`（405）、`unsupported-media
 
 ## 投递语义与限制
 
-- 当前主动投递只发送非空文字，不支持在该接口中发送图片、文件、卡片或富文本。
+- 文字投递只发送非空文字，不支持图片、卡片或富文本；文件投递走同接口的 `mediaPath` 形态（见「通过 HTTP POST 发送文件」），目前仅企业微信智能机器人支持。
 - HTTP JSON 请求体上限为 1 MiB。
 - `{ sent: true }` 表示平台发送接口接受请求或 SDK 成功返回，不承诺最终送达或已读。
 - DSH-IM 不保存主动投递历史，不生成 `deliveryHandle` 或 `idempotencyKey`，也不自动重试。

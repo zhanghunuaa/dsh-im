@@ -143,6 +143,19 @@ The fixed endpoint is `POST /api/dsh-im/delivery/messages`. It reuses the curren
 
 The HTTP endpoint currently has no authentication and does not provide CORS. Use it only on the local machine or a trusted network; never expose it directly to the public internet.
 
+## Send a file through HTTP POST
+
+Swap `text` for an absolute host path in `mediaPath` (optional `fileName` overrides the displayed name) to send a file over the same delivery path:
+
+```bash
+curl --request POST http://127.0.0.1:3080/api/dsh-im/delivery/messages --header 'Content-Type: application/json' --data '{"botId":"bot_9577c8572d454122a4ef7fb4d8420a91","targetId":"release-alerts","mediaPath":"D:/reports/2026-W45.xls","fileName":"2026-W45.xls"}'
+```
+
+- The body accepts exactly `{botId, targetId, mediaPath}`, optionally plus `fileName`; it cannot be combined with `text`.
+- `mediaPath` must be an absolute host path to an existing, non-empty regular file of at most **20 MiB** (larger payloads return `media-too-large` / HTTP 413).
+- Only the **Enterprise WeChat aibot** channel implements proactive file delivery today: the file is uploaded as temporary media (valid for three days on the platform) and pushed as a native file message. Other channels return `media-unsupported` (HTTP 422).
+- `fileName` is display-only and must not contain path separators.
+
 ## Send from a plugin in the same Host
 
 A consumer plugin can declare the `dshIm` injection and call the shared service directly without going through Connection RPC.
@@ -313,7 +326,7 @@ The HTTP protocol layer may also return `method-not-allowed` (405), `unsupported
 
 ## Delivery semantics and limits
 
-- Proactive delivery currently accepts nonempty text only. This API does not send images, files, cards, or rich content.
+- Text delivery accepts nonempty text only; it does not send images, cards, or rich content. File delivery uses the `mediaPath` form of the same endpoint (see "Send a file through HTTP POST") and is implemented for the Enterprise WeChat aibot channel.
 - The maximum HTTP JSON request body is 1 MiB.
 - `{ sent: true }` means the platform accepted the send request or its SDK returned success. It does not guarantee final delivery or a read receipt.
 - DSH-IM stores no proactive-delivery history, generates no `deliveryHandle` or `idempotencyKey`, and performs no automatic retry.

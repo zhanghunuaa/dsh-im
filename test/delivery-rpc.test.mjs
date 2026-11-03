@@ -141,3 +141,58 @@ test('delivery RPC uses its own channel and accepts Harness-admitted LAN request
     host: '192.168.1.100:3080', origin: 'http://192.168.1.100:3080',
   }), { ok: true, value: { method: 'listTargets' } });
 });
+
+test('delivery RPC forwards media payloads to sendFile and keeps strict validation', async () => {
+  const calls = [];
+  const service = {
+    send: async (...args) => { calls.push(['send', ...args]); return { sent: true }; },
+    sendFile: async (...args) => { calls.push(['sendFile', ...args]); return { sent: true }; },
+    listTargets: async () => ({ targets: [] }),
+    listSuggestions: async () => ({ suggestions: [] }),
+    createTarget: async () => ({}),
+    updateTarget: async () => ({}),
+    deleteTarget: async () => ({ deleted: true }),
+  };
+  const handle = createDeliveryRpcHandler(service);
+  const signal = new AbortController().signal;
+  const mediaPath = 'C:\\reports\\weekly.xls';
+
+  const ok = await handle('message.send', {
+    botId: 'bot_one', targetId: 'daily-report', mediaPath, fileName: 'weekly.xls',
+  }, signal);
+  assert.equal(ok.ok, true);
+  assert.deepEqual(calls.at(-1), [
+    'sendFile', 'bot_one', 'daily-report', { mediaPath, fileName: 'weekly.xls' }, { signal },
+  ]);
+
+  for (const payload of [
+    { botId: 'bot_one', targetId: 'daily-report', mediaPath: '' },
+    { botId: 'bot_one', targetId: 'daily-report', mediaPath, text: 'both' },
+    { botId: 'bot_one', targetId: 'daily-report', mediaPath, extra: 1 },
+    { botId: 'bad bot', targetId: 'daily-report', mediaPath },
+  ]) {
+    const rejected = await handle('message.send', payload, signal);
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.error.code, 'bad-request');
+  }
+  assert.equal(calls.length, 1);
+});
+
+test('delivery RPC reports media-unsupported when the service cannot send files', async () => {
+  const service = {
+    send: async () => ({ sent: true }),
+    listTargets: async () => ({ targets: [] }),
+    listSuggestions: async () => ({ suggestions: [] }),
+    createTarget: async () => ({}),
+    updateTarget: async () => ({}),
+    deleteTarget: async () => ({ deleted: true }),
+  };
+  const handle = createDeliveryRpcHandler(service);
+  const result = await handle('message.send', {
+    botId: 'bot_one', targetId: 'daily-report', mediaPath: 'C:\\reports\\weekly.xls',
+  }, new AbortController().signal);
+  assert.deepEqual(result, {
+    ok: false,
+    error: { code: 'media-unsupported', message: 'media-unsupported', details: {} },
+  });
+});

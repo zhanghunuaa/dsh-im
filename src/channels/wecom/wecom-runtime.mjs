@@ -1,7 +1,7 @@
 import { createConnectionDiagnostics, atConnectionStage } from '../shared/connection-error.mjs';
 import { WSAuthFailureError, WSClient, WSReconnectExhaustedError } from '@wecom/aibot-node-sdk';
 
-import { createWecomBridgeStatus, WecomHarnessBridge } from './wecom-bridge.mjs';
+import { createWecomBridgeStatus, sendWecomFile, WecomHarnessBridge } from './wecom-bridge.mjs';
 import { sendRememberedConnectionTest } from '../shared/connection-test.mjs';
 import { t } from '../shared/i18n.mjs';
 import { chunkMarkdownText } from '../shared/markdown-chunks.mjs';
@@ -271,6 +271,31 @@ export class WecomRuntime {
         msgtype: 'markdown', markdown: { content },
       });
     }
+    return { sent: true };
+  }
+
+  async sendProactiveFile(target, file, { signal } = {}) {
+    const chatId = typeof target?.route?.chatId === 'string'
+      ? target.route.chatId.trim() : '';
+    if ((target?.kind !== 'user' && target?.kind !== 'group') || !chatId) {
+      const error = new TypeError('Invalid Enterprise WeChat proactive delivery target');
+      error.code = 'invalid-target';
+      throw error;
+    }
+    if (!this.#status.ready || !this.#client) {
+      const error = new Error('Enterprise WeChat runtime is not connected');
+      error.code = 'bot-not-connected';
+      throw error;
+    }
+    const bytes = file?.bytes;
+    const fileName = typeof file?.fileName === 'string' ? file.fileName.trim() : '';
+    if (!Buffer.isBuffer(bytes) || bytes.length === 0 || !fileName) {
+      const error = new TypeError('A non-empty file buffer and file name are required');
+      error.code = 'media-invalid';
+      throw error;
+    }
+    signal?.throwIfAborted();
+    await sendWecomFile(this.#client, chatId, { bytes, fileName }, { signal });
     return { sent: true };
   }
 

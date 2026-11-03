@@ -22,6 +22,9 @@ const PUBLIC_ERRORS = new Set([
   'target-conflict',
   'invalid-target',
   'bot-not-connected',
+  'media-invalid',
+  'media-too-large',
+  'media-unsupported',
   'target-rejected',
   'delivery-failed',
   'session-sync-unavailable',
@@ -65,11 +68,20 @@ function validDraftTarget(value) {
 function validPayload(endpoint, payload) {
   if (!ENDPOINTS.has(endpoint) || !isRecord(payload)) return false;
   if (endpoint === DELIVERY_ENDPOINTS.send) {
-    return (exactKeys(payload, ['botId', 'targetId', 'text'])
-        || (exactKeys(payload, ['botId', 'targetId', 'text', 'format'])
-          && ['plain', 'markdown'].includes(payload.format)))
+    if (exactKeys(payload, ['botId', 'targetId', 'text'])
+      || (exactKeys(payload, ['botId', 'targetId', 'text', 'format'])
+        && ['plain', 'markdown'].includes(payload.format))) {
+      return validBotId(payload.botId) && validTargetId(payload.targetId)
+        && typeof payload.text === 'string' && Boolean(payload.text.trim());
+    }
+    const mediaKeys = ['botId', 'targetId', 'mediaPath'];
+    const withName = ['botId', 'targetId', 'mediaPath', 'fileName'];
+    return (exactKeys(payload, mediaKeys) || exactKeys(payload, withName))
       && validBotId(payload.botId) && validTargetId(payload.targetId)
-      && typeof payload.text === 'string' && Boolean(payload.text.trim());
+      && typeof payload.mediaPath === 'string' && Boolean(payload.mediaPath.trim())
+      && payload.mediaPath.length <= 4096
+      && (payload.fileName === undefined
+        || (typeof payload.fileName === 'string' && Boolean(payload.fileName.trim())));
   }
   if (endpoint === DELIVERY_ENDPOINTS.listTargets
     || endpoint === DELIVERY_ENDPOINTS.listSuggestions) {
@@ -129,7 +141,18 @@ export function createDeliveryRpcHandler(service) {
     }
     try {
       let value;
-      if (endpoint === DELIVERY_ENDPOINTS.send) {
+      if (endpoint === DELIVERY_ENDPOINTS.send && Object.hasOwn(payload, 'mediaPath')) {
+        if (typeof service.sendFile !== 'function') {
+          return {
+            ok: false,
+            error: { code: 'media-unsupported', message: 'media-unsupported', details: {} },
+          };
+        }
+        value = await service.sendFile(payload.botId, payload.targetId, {
+          mediaPath: payload.mediaPath,
+          ...(payload.fileName === undefined ? {} : { fileName: payload.fileName }),
+        }, { signal });
+      } else if (endpoint === DELIVERY_ENDPOINTS.send) {
         value = await service.send(payload.botId, payload.targetId, payload.text, {
           signal,
           ...(payload.format === undefined ? {} : { format: payload.format }),

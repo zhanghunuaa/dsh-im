@@ -197,3 +197,39 @@ test('delivery HTTP installs one exact WebServer route with Cordis lifecycle own
   assert.equal(registrations[0].path, DELIVERY_HTTP_PATH);
   assert.equal(typeof registrations[0].handler, 'function');
 });
+
+test('delivery HTTP accepts mediaPath payloads and maps media errors to statuses', async () => {
+  const calls = [];
+  const service = {
+    send: async () => ({ sent: true }),
+    sendFile: async (...args) => {
+      calls.push(args);
+      if (args[2].mediaPath.includes('huge')) {
+        throw Object.assign(new Error('media-too-large'), { code: 'media-too-large' });
+      }
+      return { sent: true };
+    },
+    listTargets: async () => ({ targets: [] }),
+    listSuggestions: async () => ({ suggestions: [] }),
+    createTarget: async () => ({}),
+    updateTarget: async () => ({}),
+    deleteTarget: async () => ({ deleted: true }),
+  };
+  await withServer(createDeliveryHttpHandler(service), async (url) => {
+    const ok = await request(url, {
+      body: JSON.stringify({
+        botId: 'bot_one', targetId: 'daily-report', mediaPath: 'C:\\reports\\weekly.xls',
+      }),
+    });
+    assert.deepEqual(ok, { status: 200, allow: null, body: { sent: true } });
+
+    const tooLarge = await request(url, {
+      body: JSON.stringify({
+        botId: 'bot_one', targetId: 'daily-report', mediaPath: 'C:\\reports\\huge.xls',
+      }),
+    });
+    assert.equal(tooLarge.status, 413);
+    assert.equal(tooLarge.body.error.code, 'media-too-large');
+  });
+  assert.equal(calls.length, 2);
+});
